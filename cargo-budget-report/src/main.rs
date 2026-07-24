@@ -404,10 +404,10 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stellar_xdr::curr::WriteXdr;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use stellar_xdr::curr::WriteXdr;
 
     fn unique_test_path() -> PathBuf {
         let mut path = std::env::temp_dir();
