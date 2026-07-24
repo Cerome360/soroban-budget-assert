@@ -5,7 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use stellar_xdr::curr::{Limits, ReadXdr, SorobanTransactionData, WriteXdr};
+use stellar_xdr::curr::{Limits, ReadXdr, SorobanTransactionData};
 use tabled::{Table, Tabled};
 use wasmparser::Parser as WasmParser;
 
@@ -35,6 +35,7 @@ struct BudgetToml {
     functions: HashMap<String, FunctionConfig>,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug)]
 struct Resources {
     instructions: u64,
@@ -42,6 +43,7 @@ struct Resources {
     write_bytes: u64,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize, Debug)]
 struct TransactionData {
     #[serde(alias = "resources")]
@@ -341,19 +343,19 @@ fn main() -> Result<()> {
                 package: package.name.to_string(),
                 function: function.clone(),
                 metric: "CPU Instructions",
-                value: instructions as u32,
+                value: instructions,
             });
             reports.push(CostReport {
                 package: package.name.to_string(),
                 function: function.clone(),
                 metric: "Read Bytes",
-                value: read_bytes as u32,
+                value: read_bytes,
             });
             reports.push(CostReport {
                 package: package.name.to_string(),
                 function: function.clone(),
                 metric: "Write Bytes",
-                value: write_bytes as u32,
+                value: write_bytes,
             });
         }
     }
