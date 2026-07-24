@@ -3,7 +3,9 @@ use cargo_metadata::MetadataCommand;
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
+use stellar_xdr::curr::{Limits, ReadXdr, SorobanTransactionData, WriteXdr};
 use tabled::{Table, Tabled};
 use wasmparser::Parser as WasmParser;
 
@@ -31,6 +33,28 @@ struct BudgetToml {
     source: Option<String>,
     #[serde(default)]
     functions: HashMap<String, FunctionConfig>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct Resources {
+    instructions: u64,
+    disk_read_bytes: u64,
+    write_bytes: u64,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct TransactionData {
+    #[serde(alias = "resources")]
+    resources: Resources,
+}
+
+impl TransactionData {
+    #[cfg(test)]
+    fn parse_json(json_str: &str) -> Result<Self> {
+        let parsed_json: serde_json::Value =
+            serde_json::from_str(json_str).context("Failed to parse JSON")?;
+        serde_json::from_value(parsed_json).context("Failed to deserialize transaction data")
+    }
 }
 
 #[derive(serde::Deserialize, Default, Debug)]
@@ -76,13 +100,34 @@ fn format_with_commas_and_units(value: u32, metric: &str) -> String {
     }
 }
 
+fn extract_metrics(rpc_response: &serde_json::Value) -> Result<(u32, u32, u32)> {
+    let tx_data_b64 = rpc_response["result"]["transactionData"]
+        .as_str()
+        .context("No transactionData found in simulateTransaction response.")?;
+
+    let tx_data = SorobanTransactionData::from_xdr_base64(tx_data_b64, Limits::none())
+        .context("Failed to decode SorobanTransactionData from base64 XDR")?;
+
+    Ok((
+        tx_data.resources.instructions,
+        tx_data.resources.read_bytes,
+        tx_data.resources.write_bytes,
+    ))
+}
+
+fn load_budget_toml<P: AsRef<Path>>(path: P) -> Result<BudgetToml> {
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str(&contents)
+            .map_err(|err| anyhow::anyhow!("failed to parse {}: {}", path.as_ref().display(), err)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BudgetToml::default()),
+        Err(err) => Err(err).with_context(|| format!("failed to read {}", path.as_ref().display())),
+    }
+}
+
 fn main() -> Result<()> {
     let CargoCli::BudgetReport(args) = CargoCli::parse();
 
-    let toml_config: BudgetToml = std::fs::read_to_string("budget.toml")
-        .ok()
-        .and_then(|s| toml::from_str(&s).ok())
-        .unwrap_or_default();
+    let toml_config = load_budget_toml("budget.toml")?;
 
     let network = args
         .network
@@ -100,12 +145,13 @@ fn main() -> Result<()> {
         .context("failed to execute cargo metadata")?;
 
     let mut reports = Vec::new();
+    let mut has_errors = false;
 
     for package in metadata.packages {
         let is_cdylib = package
             .targets
             .iter()
-            .any(|t| t.crate_types.iter().any(|c| c.to_string() == "cdylib"));
+            .any(|t| t.crate_types.iter().any(|c| *c == "cdylib"));
         if !is_cdylib {
             continue;
         }
@@ -230,6 +276,7 @@ fn main() -> Result<()> {
                 .context("failed to execute stellar-cli invoke")?;
 
             if !invoke_output.status.success() {
+                has_errors = true;
                 eprintln!(
                     "Warning: Simulation failed for {}: {}",
                     function,
@@ -282,62 +329,40 @@ fn main() -> Result<()> {
                 .context("Failed to parse RPC response")?;
 
             if let Some(error) = rpc_resp.get("error") {
+                has_errors = true;
                 eprintln!("Warning: RPC error for {}: {}", function, error);
                 continue;
             }
 
-            let tx_data_b64 = rpc_resp["result"]["transactionData"]
-                .as_str()
-                .context("No transactionData found in simulateTransaction response.")?;
-
-            let mut decode_cmd = Command::new("stellar")
-                .args(["xdr", "decode", "--type", "SorobanTransactionData"])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .context("failed to execute stellar xdr decode")?;
-
-            {
-                let stdin = decode_cmd.stdin.as_mut().context("Failed to open stdin")?;
-                stdin
-                    .write_all(tx_data_b64.as_bytes())
-                    .context("Failed to write to stdin")?;
-            }
-
-            let decode_output = decode_cmd
-                .wait_with_output()
-                .context("Failed to read stdout")?;
-            let json_str = String::from_utf8_lossy(&decode_output.stdout);
-            let parsed: serde_json::Value =
-                serde_json::from_str(&json_str).context("Failed to parse XDR JSON")?;
-
-            let instructions = parsed["resources"]["instructions"].as_u64().unwrap_or(0) as u32;
-            let read_bytes = parsed["resources"]["disk_read_bytes"].as_u64().unwrap_or(0) as u32;
-            let write_bytes = parsed["resources"]["write_bytes"].as_u64().unwrap_or(0) as u32;
+            let (instructions, read_bytes, write_bytes) =
+                extract_metrics(&rpc_resp).context("Failed to extract metrics from RPC response")?;
 
             reports.push(CostReport {
                 package: package.name.to_string(),
                 function: function.clone(),
                 metric: "CPU Instructions",
-                value: instructions,
+                value: instructions as u32,
             });
             reports.push(CostReport {
                 package: package.name.to_string(),
                 function: function.clone(),
                 metric: "Read Bytes",
-                value: read_bytes,
+                value: read_bytes as u32,
             });
             reports.push(CostReport {
                 package: package.name.to_string(),
                 function: function.clone(),
                 metric: "Write Bytes",
-                value: write_bytes,
+                value: write_bytes as u32,
             });
         }
     }
 
     if reports.is_empty() {
         eprintln!("No successful simulations to report.");
+        if has_errors {
+            std::process::exit(1);
+        }
         return Ok(());
     }
 
@@ -361,9 +386,230 @@ fn main() -> Result<()> {
             .collect();
         let table = Table::new(table_reports).to_string();
         println!("{}", table);
-        println!("\nSummary: The metrics above represent the total unrefundable network execution costs required to run your contract functions.");
+        println!("\nSummary: The values above are simulated resource amounts, not fees. They are three of the inputs to the non-refundable resource fee.");
+        println!("* Not measured: transaction size, ledger footprint entry counts, refundable fees (rent, events, return value), the inclusion fee, and therefore the total fee charged.");
         println!("* Note: These are simulated numbers on testnet and may vary slightly depending on ledger state.");
+        println!("* See the \"Measurement scope\" section of the Tool Reference for what to use instead when you need those figures.");
+    }
+
+    if has_errors {
+        std::process::exit(1);
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_path() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is before UNIX_EPOCH")
+            .as_nanos();
+        path.push(format!("cargo_budget_report_test_{}.toml", nanos));
+        path
+    }
+
+    // --- Metric extraction tests ---
+
+    const FIXTURE_INSTRUCTIONS: u32 = 1_000_000;
+    const FIXTURE_READ_BYTES: u32 = 2_048;
+    const FIXTURE_WRITE_BYTES: u32 = 4_096;
+    const FIXTURE_RESOURCE_FEE: i64 = 0;
+
+    fn make_fixture_tx_data() -> SorobanTransactionData {
+        use stellar_xdr::curr::{ExtensionPoint, LedgerFootprint, VecM};
+        SorobanTransactionData {
+            ext: ExtensionPoint::V0,
+            resources: stellar_xdr::curr::SorobanResources {
+                footprint: LedgerFootprint {
+                    read_only: VecM::default(),
+                    read_write: VecM::default(),
+                },
+                instructions: FIXTURE_INSTRUCTIONS,
+                read_bytes: FIXTURE_READ_BYTES,
+                write_bytes: FIXTURE_WRITE_BYTES,
+            },
+            resource_fee: FIXTURE_RESOURCE_FEE,
+        }
+    }
+
+    fn fixture_rpc_response_json() -> serde_json::Value {
+        let tx_data = make_fixture_tx_data();
+        let b64 = tx_data
+            .to_xdr_base64(Limits::none())
+            .expect("failed to encode fixture SorobanTransactionData");
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "transactionData": b64
+            }
+        })
+    }
+
+    #[test]
+    fn extract_metrics_from_programmatic_rpc_response() {
+        let rpc_json = fixture_rpc_response_json();
+        let (instructions, read_bytes, write_bytes) =
+            extract_metrics(&rpc_json).expect("extraction should succeed");
+        assert_eq!(instructions, FIXTURE_INSTRUCTIONS);
+        assert_eq!(read_bytes, FIXTURE_READ_BYTES);
+        assert_eq!(write_bytes, FIXTURE_WRITE_BYTES);
+    }
+
+    #[test]
+    fn extract_metrics_from_fixture_file() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join("simulate_transaction_response_valid.json");
+        let fixture_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .expect("failed to read fixture file"),
+        )
+        .expect("failed to parse fixture JSON");
+
+        let meta = &fixture_json["_metadata"];
+        assert_eq!(meta["network"].as_str(), Some("testnet"));
+        assert!(meta["protocol_version"].as_u64().is_some());
+
+        let (instructions, read_bytes, write_bytes) =
+            extract_metrics(&fixture_json).expect("extraction from fixture should succeed");
+        assert_eq!(instructions, FIXTURE_INSTRUCTIONS);
+        assert_eq!(read_bytes, FIXTURE_READ_BYTES);
+        assert_eq!(write_bytes, FIXTURE_WRITE_BYTES);
+    }
+
+    #[test]
+    fn extract_metrics_fails_on_missing_transaction_data() {
+        let rpc_json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "some_other_field": "no transaction data here"
+            }
+        });
+        let result = extract_metrics(&rpc_json);
+        assert!(result.is_err());
+        let err = format!("{:#}", result.as_ref().unwrap_err());
+        assert!(
+            err.contains("transactionData"),
+            "error should mention transactionData, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn extract_metrics_fails_on_invalid_xdr() {
+        let rpc_json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "transactionData": "this-is-not-valid-base64-xdr!!!"
+            }
+        });
+        let result = extract_metrics(&rpc_json);
+        assert!(result.is_err(), "extraction should fail on invalid XDR");
+    }
+
+    #[test]
+    fn extract_metrics_from_malformed_fixture_file() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join("simulate_transaction_response_malformed.json");
+        let fixture_json: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .expect("failed to read malformed fixture file"),
+        )
+        .expect("failed to parse malformed fixture JSON");
+
+        let result = extract_metrics(&fixture_json);
+        assert!(result.is_err(), "extraction should fail on malformed response");
+    }
+
+    #[test]
+    fn extract_metrics_fails_on_non_string_transaction_data() {
+        let rpc_json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "transactionData": 12345
+            }
+        });
+        let result = extract_metrics(&rpc_json);
+        assert!(result.is_err(), "extraction should fail when transactionData is not a string");
+    }
+
+    // --- Budget toml loading tests ---
+
+    #[test]
+    fn missing_budget_toml_returns_default() {
+        let path = unique_test_path();
+        let _ = fs::remove_file(&path);
+
+        let config = load_budget_toml(&path).expect("missing file should return default");
+        assert!(config.network.is_none());
+        assert!(config.source.is_none());
+        assert!(config.functions.is_empty());
+    }
+
+    #[test]
+    fn malformed_budget_toml_errors_with_parse_message() {
+        let path = unique_test_path();
+        fs::write(
+            &path,
+            "network = \"testnet\"\n[functions.do_expensive_work]\nargs = \"--n 10\"\n",
+        )
+        .expect("failed to write malformed budget.toml");
+
+        let err = load_budget_toml(&path).unwrap_err();
+        let err_text = err.to_string();
+
+        assert!(err_text.contains("failed to parse"));
+        assert!(err_text.contains("line") || err_text.contains("Line"));
+        assert!(err_text.contains("column") || err_text.contains("Column"));
+    }
+
+    // --- TransactionData deserialization tests ---
+
+    #[test]
+    fn transaction_data_parsing_deserializes_successfully() {
+        let json_str = r#"{"resources": {"instructions": 1000, "disk_read_bytes": 2048, "write_bytes": 3072}}"#;
+        let tx_data = TransactionData::parse_json(json_str).expect("Parsing should succeed");
+        assert_eq!(tx_data.resources.instructions, 1000);
+        assert_eq!(tx_data.resources.disk_read_bytes, 2048);
+        assert_eq!(tx_data.resources.write_bytes, 3072);
+    }
+
+    #[test]
+    fn transaction_data_parsing_fails_on_missing_field() {
+        let json_str = r#"{"resources": {"instructions": 1000, "disk_read_bytes": 2048}}"#;
+        let result = TransactionData::parse_json(json_str);
+        assert!(result.is_err(), "Parsing should fail on missing field");
+        let err_msg = format!("{:#}", result.as_ref().unwrap_err());
+        assert!(
+            err_msg.contains("write_bytes"),
+            "Error should mention missing field, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn transaction_data_parsing_fails_on_non_numeric_field() {
+        let json_str = r#"{"resources": {"instructions": "not-a-number", "disk_read_bytes": 2048, "write_bytes": 3072}}"#;
+        let result = TransactionData::parse_json(json_str);
+        assert!(result.is_err(), "Parsing should fail on non-numeric field");
+        let err_msg = format!("{:#}", result.as_ref().unwrap_err());
+        assert!(
+            err_msg.contains("invalid type") || err_msg.contains("not-a-number"),
+            "Error should mention type mismatch, got: {}",
+            err_msg
+        );
+    }
 }
