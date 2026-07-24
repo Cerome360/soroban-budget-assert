@@ -334,8 +334,8 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            let (instructions, read_bytes, write_bytes) =
-                extract_metrics(&rpc_resp).context("Failed to extract metrics from RPC response")?;
+            let (instructions, read_bytes, write_bytes) = extract_metrics(&rpc_resp)
+                .context("Failed to extract metrics from RPC response")?;
 
             reports.push(CostReport {
                 package: package.name.to_string(),
@@ -470,8 +470,7 @@ mod tests {
             .join("fixtures")
             .join("simulate_transaction_response_valid.json");
         let fixture_json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&fixture_path)
-                .expect("failed to read fixture file"),
+            &std::fs::read_to_string(&fixture_path).expect("failed to read fixture file"),
         )
         .expect("failed to parse fixture JSON");
 
@@ -524,13 +523,15 @@ mod tests {
             .join("fixtures")
             .join("simulate_transaction_response_malformed.json");
         let fixture_json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&fixture_path)
-                .expect("failed to read malformed fixture file"),
+            &std::fs::read_to_string(&fixture_path).expect("failed to read malformed fixture file"),
         )
         .expect("failed to parse malformed fixture JSON");
 
         let result = extract_metrics(&fixture_json);
-        assert!(result.is_err(), "extraction should fail on malformed response");
+        assert!(
+            result.is_err(),
+            "extraction should fail on malformed response"
+        );
     }
 
     #[test]
@@ -543,7 +544,10 @@ mod tests {
             }
         });
         let result = extract_metrics(&rpc_json);
-        assert!(result.is_err(), "extraction should fail when transactionData is not a string");
+        assert!(
+            result.is_err(),
+            "extraction should fail when transactionData is not a string"
+        );
     }
 
     // --- Budget toml loading tests ---
