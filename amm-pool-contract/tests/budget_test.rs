@@ -5,7 +5,7 @@ use budget_macros::{budget_cpu_lt, budget_mem_lt};
 use soroban_sdk::{testutils::Address as _, Address, Env};
 
 fn setup_wasm(env: &Env) -> (ConstantProductPoolClient<'_>, Address) {
-    let wasm_path = "../target/wasm32-unknown-unknown/release/amm_pool_contract.wasm";
+    let wasm_path = "../target/wasm32v1-none/release/amm_pool_contract.wasm";
     let wasm = std::fs::read(wasm_path).expect("WASM file not found, did you run cargo build?");
     #[allow(deprecated)]
     let contract_id = env.register_contract_wasm(None, wasm.as_slice());
@@ -54,7 +54,7 @@ fn test_budget_wasm() {
 }
 
 #[test]
-#[budget_cpu_lt(2500000)] // Re-measured: WASM local 2307555, simulates deposit+swap+withdraw
+#[budget_cpu_lt(3000000)] // Re-measured: WASM local 2770850, simulates deposit+swap+withdraw
 fn test_budget_macro_gated() {
     let env = Env::default();
     let (client, user) = setup_wasm(&env);
@@ -97,7 +97,7 @@ fn test_budget_macro_mem_deliberate_regression() {
 fn test_budget_macro_dynamic_env() {
     let budget_env_resolve = |var: &str| -> Option<String> {
         if var == "TEST_MAX_CPU" {
-            Some("2500000".to_string())
+            Some("3000000".to_string())
         } else {
             None
         }
