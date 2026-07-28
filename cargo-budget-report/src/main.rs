@@ -1692,9 +1692,9 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-mod module_4;
-mod module_3;
 mod module_2;
+mod module_3;
+mod module_4;
 pub mod validate;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
