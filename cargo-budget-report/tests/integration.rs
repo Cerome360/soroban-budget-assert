@@ -116,7 +116,9 @@ fn json_output_reports_both_mock_contracts() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let reports: serde_json::Value =
         serde_json::from_str(&stdout).expect("stdout should be valid JSON");
-    let reports = reports.as_array().expect("report should be a JSON array");
+    let reports = reports["snapshots"]
+        .as_array()
+        .expect("report should have snapshots array");
 
     let packages: std::collections::HashSet<&str> = reports
         .iter()

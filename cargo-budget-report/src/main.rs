@@ -7,6 +7,7 @@ mod cli;
 mod compare;
 mod fixture;
 mod html_output;
+mod json_output;
 mod live;
 mod record;
 mod replay;
@@ -1884,8 +1885,11 @@ fn main() -> anyhow::Result<()> {
         }
         csv_writer.flush().context("Failed to flush CSV writer")?;
     } else if args.json {
-        let json_output =
-            serde_json::to_string_pretty(&reports).context("Failed to serialize report to JSON")?;
+        let json_output = serde_json::to_string_pretty(&json_output::BudgetReportJson {
+            schema_version: json_output::SCHEMA_VERSION,
+            snapshots: &reports,
+        })
+        .context("Failed to serialize report to JSON")?;
         println!("{}", json_output);
     } else if args.html {
         print!("{}", html_output::render_html(&reports, args.check));
