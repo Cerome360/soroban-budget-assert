@@ -35,7 +35,6 @@ use wasmparser::Parser as WasmParser;
 
 mod derive;
 mod error;
-mod json_output;
 mod watch;
 
 /// Maximum number of total deployment attempts (1 initial + 3 retries)
